@@ -1,134 +1,66 @@
-name: Build and Push Docker Images
+name: Hot News Crawler
 
 on:
-  push:
-    tags:
-      - "v*" # 主项目版本
-      - "mcp-v*" # MCP 版本
+  schedule:
+    # 我们使用的是 github 官方提供的资源来进行的推送，而每个账号的资源是限额的，为了不被官方判定为滥用而面临封号的风险，不建议比半小时更低
+    - cron: "0 * * * *" # 每小时整点运行一次(实际有偏差) 或者 "*/30 * * * *" (每半小时执行一次) 或者 "*/30 0-14 * * *"(每天早上 8 点到晚上 10 点期间，每半小时运行一次)
   workflow_dispatch:
-    inputs:
-      image:
-        description: "选择要构建的镜像"
-        required: true
-        default: "all"
-        type: choice
-        options:
-          - all
-          - crawler
-          - mcp
 
-env:
-  REGISTRY: docker.io
+# 添加权限设置
+permissions:
+  contents: write
 
 jobs:
-  build-crawler:
+  crawl:
     runs-on: ubuntu-latest
-    # 条件：v* 标签（排除 mcp-v*）或手动触发选择 all/crawler
-    if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/mcp-v')) ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.image == 'all' || github.event.inputs.image == 'crawler'))
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          driver-opts: |
-            network=host
+          python-version: "3.12"
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: wantcat/trendradar
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        env:
-          BUILDKIT_PROGRESS: plain
-        with:
-          context: .
-          file: ./docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  build-mcp:
-    runs-on: ubuntu-latest
-    # 条件：mcp-v* 标签 或手动触发选择 all/mcp
-    if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/mcp-v')) ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.image == 'all' || github.event.inputs.image == 'mcp'))
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            network=host
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract version from tag
-        id: version
+      - name: Install dependencies
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/mcp-v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/mcp-v}"
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-            echo "major_minor=$(echo $VERSION | cut -d. -f1,2)" >> $GITHUB_OUTPUT
-          else
-            echo "version=latest" >> $GITHUB_OUTPUT
-            echo "major_minor=latest" >> $GITHUB_OUTPUT
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install playwright
+          playwright install --with-deps
+
+      - name: Verify required files
+        run: |
+          echo "🔍 检查必需的配置文件..."
+
+          if [ ! -f config/config.yaml ]; then
+            echo "❌ 错误: config/config.yaml 文件不存在"
+            echo "请参考项目文档创建配置文件"
+            exit 1
           fi
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: wantcat/trendradar-mcp
-          tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}
-            type=raw,value=latest
+          if [ ! -f config/frequency_words.txt ]; then
+            echo "❌ 错误: config/frequency_words.txt 文件不存在"
+            echo "请参考项目文档创建频率词配置文件"
+            exit 1
+          fi
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
+          echo "✅ 配置文件检查通过"
+
+      - name: Run crawler
         env:
-          BUILDKIT_PROGRESS: plain
-        with:
-          context: .
-          file: ./docker/Dockerfile.mcp
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          WEWORK_WEBHOOK_URL: ${{ secrets.WEWORK_WEBHOOK_URL }}
+          GITHUB_ACTIONS: true
+        run: python main.py
+
+      - name: Commit and push if changes
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add -A
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update by GitHub Actions at $(TZ=Asia/Shanghai date)" && git push)
